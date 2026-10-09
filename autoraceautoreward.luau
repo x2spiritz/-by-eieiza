@@ -129,7 +129,36 @@ if not loaded then
 end
 
 local state = {enabled = false, alive = true, selected = {}, stars = 1,
-    exact = false, slot = nil, pending = nil, count = 0, message = "พร้อมใช้งาน"}
+    exact = false, slot = nil, pending = nil, count = 0, message = "พร้อมใช้งาน",
+    fast = true, skipAnimation = false}
+local classGUI, originalLuckAnim, skippedLuckAnim
+local function setSkipAnimation(enabled)
+    if enabled then
+        if not classGUI then
+            local module = path(RS, "GuiUtils", "ClassGUI")
+            local success, value = pcall(function() return module and require(module) end)
+            if not success or type(value) ~= "table" or type(value.LuckAnim) ~= "function" then
+                notify("เปิด Skip Animation ไม่สำเร็จ: ไม่พบ ClassGUI.LuckAnim")
+                return false
+            end
+            classGUI = value
+        end
+        if not state.skipAnimation then
+            originalLuckAnim = classGUI.LuckAnim
+            skippedLuckAnim = function() end
+            -- The game's event handler calls ClassGUI.LuckAnim dynamically.
+            -- Replace only the visual function; keep result/profile events active.
+            classGUI.LuckAnim = skippedLuckAnim
+        end
+        state.skipAnimation = true
+    else
+        if classGUI and classGUI.LuckAnim == skippedLuckAnim then
+            classGUI.LuckAnim = originalLuckAnim
+        end
+        state.skipAnimation = false
+    end
+    return true
+end
 local rewardState = {enabled = false, selected = {['4'] = true, ['5'] = true, ['6'] = true},
     delay = 0.1, sent = 0, message = "พร้อมใช้งาน"}
 env.rayvinz = false
@@ -137,6 +166,7 @@ local window
 local controller = {}
 local connection
 function controller:Destroy()
+    setSkipAnimation(false)
     state.alive = false
     state.enabled = false
     rewardState.enabled = false
@@ -155,6 +185,17 @@ window.ConfigHandler.data = {}
 local tab = window:CreateTab("Auto Race")
 tab:CreateParagraph({Title = "วิธีใช้", Content = "เลือกช่องเผ่าในเกมก่อนเริ่ม → เลือกเผ่าหลายเผ่า → เลือกดาว → เปิด Auto Roll\nหยุดเมื่อได้เผ่าใดเผ่าหนึ่งที่เลือกและดาวถึงเกณฑ์ ใช้สิทธิ์สุ่มตามปกติ\nดาวคือ Level สะสมของเผ่า กด RightShift เพื่อซ่อน/แสดงเมนู"})
 tab:CreateSection("เป้าหมาย")
+tab:CreateToggle({Name = "Skip Animation", Flag = "SkipRaceAnimation", CurrentValue = false,
+    Callback = function(value)
+        if not setSkipAnimation(value) then
+            local flag = window.Flags.SkipRaceAnimation
+            if flag and flag:GetValue() then flag:SetValue(false) end
+        end
+    end})
+tab:CreateToggle({Name = "สุ่มเร็ว (ตัดเวลารอในสคริปต์)", CurrentValue = true,
+    Callback = function(value) state.fast = value end})
+tab:CreateParagraph({Title = "ความเร็ว", Content = "Skip Animation ข้ามภาพสุ่มฝั่งผู้เล่น\nโหมดเร็วตัดเวลารอเมื่อได้ Profile/ผลสุ่ม หากอ่านได้เฉพาะ UI จะรอข้อมูลนิ่ง\nคูลดาวน์ที่เซิร์ฟเวอร์กำหนดยังคงมีผล"})
+window.Flags.SkipRaceAnimation:SetValue(true)
 local names, ids = {}, {}
 local config = helper.GetConfig()
 local ordered = {}
@@ -236,7 +277,7 @@ task.spawn(function()
             local confirmed = false
             local lastSnapshot, stableSince
             repeat
-                task.wait(0.1)
+                task.wait(state.fast and 0.03 or 0.1)
                 local currentRace = data.GetClassByIndex(slot)
                 local currentLevel = currentRace and data.GetClassLevel(currentRace)
                 local remaining = data.GetLuckTimes()
@@ -247,10 +288,14 @@ task.spawn(function()
                 end
                 -- A consumed roll credit is replicated confirmation even when
                 -- ShowLuckResultRE is missing. Same-race rolls are valid too.
-                -- Allow the normal animation/data updates to settle before another roll.
+                -- Fast confirmation requires the live profile stream or a
+                -- matching result event. With only cached/UI data, retain the
+                -- longer settle window to avoid rolling past a delayed target.
+                local fastConfirmed = state.fast and (liveClass ~= nil
+                    or (pending.result ~= nil and currentRace == pending.result))
                 confirmed = remaining < credits and currentRace ~= nil and currentLevel ~= nil
-                    and os.clock() - pending.sentAt >= 4.5
-                    and os.clock() - stableSince >= 0.6
+                    and (fastConfirmed or os.clock() - pending.sentAt >= 4.5)
+                    and os.clock() - stableSince >= (fastConfirmed and 0.1 or 0.6)
                 state.message = string.format("รอข้อมูล %.1fวิ | สิทธิ์ %s → %s | อ่านจาก %s",
                     os.clock() - pending.sentAt, tostring(credits), tostring(remaining),
                     liveClass and "Profile" or (classUI() and "UI" or "ClassData"))
@@ -268,7 +313,7 @@ task.spawn(function()
             if state.enabled then state.message = "กำลังสุ่ม" end
         end)
         if not success then state.pending = nil; stop("ข้อผิดพลาด: " .. tostring(err)) end
-        task.wait(0.6)
+        task.wait(state.fast and 0.03 or 0.6)
     end
 end)
 task.spawn(function()
